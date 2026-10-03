@@ -8,3 +8,4 @@ MouseClickTool.csproj.user
 GzExe.csproj.user
 output/
 *.def
+.zcode/

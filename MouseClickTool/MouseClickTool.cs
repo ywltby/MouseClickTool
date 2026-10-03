@@ -13,12 +13,34 @@ public class MouseClickTool : Form
     private TaskCompletionSource<int>? z;
     private int wait = 3;
     private Input m;
-    private IntPtr hh;
-    private LLMP? hp;
     private int ht;
+    private System.Windows.Forms.Timer? middlePoll;
+    private bool middleDown;
 
     public MouseClickTool()
     {
+        // 全局异常兜底:此前 UI 线程外抛会走系统崩溃框,后台任务异常被静默吞掉,均无迹可查。
+        // 不能调用 SetUnhandledExceptionMode:基类 Form 构造先于本构造体执行,届时"线程已创建控件"检查必然失败;
+        // 默认 Automatic 模式下 ThreadException 事件有订阅者时同样接管 UI 线程异常
+        Application.ThreadException += (_, e) => Log.Error("ui thread exception", e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            var ex = e.ExceptionObject as Exception ?? new Exception($"{e.ExceptionObject}");
+
+            // 无堆栈的异常(来自 CLR 转换层等)只能靠当前线程栈定位,一并记录
+            Log.Error($"appdomain unhandled exception (terminating={e.IsTerminating})\r\nthread-stack={Environment.StackTrace}", ex);
+        };
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            Log.Error("unobserved task exception", e.Exception);
+            e.SetObserved();
+        };
+
+        // 退出判别:ProcessExit/ApplicationExit 仅在自愿退出时触发(被 TerminateProcess 杀死不会触发)。
+        // 若死亡时日志末尾有这两行 = 程序自己退的;若戛然而止 = 被外部终止
+        Application.ApplicationExit += (_, _) => Log.Info("application exit event");
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => Log.Info("process exit: graceful shutdown");
+        Log.Banner();
         Application.EnableVisualStyles();
         AutoScaleMode = AutoScaleMode.Dpi;
         var cl = CultureInfo.CurrentUICulture;
@@ -28,20 +50,39 @@ public class MouseClickTool : Form
             dark = (int)Microsoft.Win32.Registry.GetValue("HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", "AppsUseLightTheme", -1) == 0;
             SetProcessDpiAwarenessContext((IntPtr)(-4)); // v2
         }
-        catch
+        catch (Exception ex)
         {
+            Log.Warn($"dark-mode/DPI init failed: {ex.Message}");
         }
 
         cfg = ["F1", "1000", "0", "600", string.Empty, string.Empty, "False", string.Empty, "False", "MouseClickTool", string.Empty, string.Empty];
         var ini = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "MouseClickTool_V3.3.ini");
         if (File.Exists(ini))
         {
-            var tCfg = File.ReadAllLines(ini);
-            if (tCfg.Length == cfg.Length)
+            try
             {
-                cfg = tCfg;
+                var tCfg = File.ReadAllLines(ini);
+                if (tCfg.Length == cfg.Length)
+                {
+                    cfg = tCfg;
+                    Log.Info($"config loaded: {ini}");
+                }
+                else
+                {
+                    Log.Warn($"config line count {tCfg.Length} != {cfg.Length}, keep defaults");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error($"config read failed: {ini}", ex);
             }
         }
+        else
+        {
+            Log.Info("config not found, using defaults");
+        }
+
+        Log.Info($"config: {string.Join(" | ", cfg)}");
 
         if (cl.Name.Contains("zh"))
         {
@@ -226,7 +267,7 @@ public class MouseClickTool : Form
         d1.SelectedIndexChanged += (_, _) =>
         {
             UnregisterHotKey(Handle, hotkeyId);
-            UnhookMouse();
+            StopMiddlePoll();
             hk = false;
             if (d1.Text == custom)
             {
@@ -242,12 +283,13 @@ public class MouseClickTool : Form
 
             if (d1.Text == middle)
             {
-                HookMouse();
+                StartMiddlePoll();
             }
             else if (TryParseHotkey(d1.Text, out int mods, out var key))
             {
                 if (!RegisterHotKey(Handle, hotkeyId, mods, key))
                 {
+                    Log.Warn($"RegisterHotKey({d1.Text}) failed, err={Marshal.GetLastWin32Error()}");
                     MessageBox.Show(string.Format(lang[22], d1.Text), null, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
@@ -550,13 +592,15 @@ public class MouseClickTool : Form
         };
         FormClosing += (_, _) =>
         {
-            UnhookMouse();
+            Log.Info("closing, saving config");
+            StopMiddlePoll();
             try
             {
                 File.WriteAllLines(ini, cfg);
             }
-            catch
+            catch (Exception ex)
             {
+                Log.Error($"config save failed: {ini}", ex);
             }
         };
         byte[] r0 = new byte[4];
@@ -598,7 +642,9 @@ public class MouseClickTool : Form
                 }
 
                 var longPress = a2.SelectedIndex > 1;
-                Task.Run(async () =>
+                var actionName = a2.Text;
+                var triggerName = cfg[0];
+                _ = Task.Run(async () =>
                 {
                     for (int i = 1; i < wait; i++)
                     {
@@ -608,7 +654,9 @@ public class MouseClickTool : Form
 
                     var pressed = false;
                     var size = Marshal.SizeOf(m);
-                    z = new();
+
+                    // RunContinuationsAsynchronously: 停止续体不再内联到触发线程(钩子回调)执行
+                    z = new(TaskCreationOptions.RunContinuationsAsynchronously);
                     var tg = (int)(b1.Value - DateTime.Now).TotalMilliseconds;
                     ulong.TryParse(c1.Text.Trim(), NumberStyles.Integer, cl, out ulong total);
                     var unrestricted = total < 1;
@@ -636,18 +684,21 @@ public class MouseClickTool : Form
                         {
                             scriptArr = File.ReadAllLines(scriptFile);
                             scriptCount = scriptArr.Length;
+                            Log.Info($"script loaded: {scriptFile} ({scriptCount} lines)");
                             if (HasCreateProcessCommand(scriptArr))
                             {
                                 var result = DialogResult.No;
                                 Invoke(() => result = MessageBox.Show(string.Format(lang[32], scriptFile), lang[31], MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2));
                                 if (result != DialogResult.Yes)
                                 {
+                                    Log.Warn($"script rejected by user: {scriptFile}");
                                     z?.TrySetCanceled();
                                 }
                             }
                         }
                         else
                         {
+                            Log.Warn($"script file missing: {scriptFile}");
                             z?.TrySetCanceled();
                         }
                     }
@@ -659,8 +710,10 @@ public class MouseClickTool : Form
 
                     using var logWriter = CreateLogWriter(z != null && !z.Task.IsCanceled && r9 && runAsScript && scriptArr != null);
                     var logCount = 0;
+                    var logBroken = false;
                     var logTick = Environment.TickCount;
                     var uiTick = Environment.TickCount;
+                    Log.Info($"start: action={actionName}, interval={delay}ms, {(unrestricted ? "count=unlimited" : $"count={total}")}, schedule_in={Math.Max(tg, 0)}ms, longPress={longPress}, randomJitter={r1}, trigger={triggerName}");
                     for (ulong count = 0; z != null && !z.Task.IsCanceled && (unrestricted || count < total || longPress); count++)
                     {
                         if (runAsScript)
@@ -711,7 +764,7 @@ public class MouseClickTool : Form
                                         }
                                     }
 
-                                    if (logWriter != null)
+                                    if (logWriter != null && !logBroken)
                                     {
                                         try
                                         {
@@ -724,8 +777,10 @@ public class MouseClickTool : Form
                                                 logTick = tick;
                                             }
                                         }
-                                        catch
+                                        catch (Exception ex)
                                         {
+                                            logBroken = true;
+                                            Log.Error("script log write failed, disabled for this run", ex);
                                         }
                                     }
 
@@ -873,6 +928,7 @@ public class MouseClickTool : Form
                         SendInput(size);
                     }
 
+                    Log.Info(z != null && z.Task.IsCanceled ? "stop: cancelled" : "stop: finished");
                     await Task.Delay(delay == 0 ? 5 : 0);
                     wait = 3;
                     z = null;
@@ -888,18 +944,42 @@ public class MouseClickTool : Form
                         b1.Value = DateTime.Now;
                         UpdateText();
                     });
-                });
+                }).ContinueWith(
+                    t =>
+                    {
+                        // 点击循环任何未处理异常在此兜底记录,并恢复 UI,避免卡在"停止"态无迹可查
+                        Log.Error("click loop faulted", t.Exception?.GetBaseException());
+                        wait = 3;
+                        z = null;
+                        try
+                        {
+                            Invoke((MethodInvoker)(() =>
+                            {
+                                a1.Enabled = a2.Enabled = b1.Enabled = c1.Enabled = true;
+                                b1.Value = DateTime.Now;
+                                UpdateText();
+                            }));
+                        }
+                        catch (Exception ex2)
+                        {
+                            Log.Error("restore UI after fault failed", ex2);
+                        }
+                    },
+                    TaskContinuationOptions.OnlyOnFaulted);
             }
             else
             {
                 z?.TrySetCanceled();
             }
         };
-        hp = MouseHookCb;
+
+        // 心跳:定期证明 UI 线程消息泵存活;若日志心跳戛然而止且无任何异常记录,说明线程挂死或进程被外部终止
+        var startTick = Environment.TickCount;
+        var heartbeat = new System.Windows.Forms.Timer { Interval = 30000 };
+        heartbeat.Tick += (_, _) => Log.Info($"heartbeat: up={(Environment.TickCount - startTick) / 1000}s, poll={(middlePoll != null ? "on" : "off")}, state={(z == null ? "idle" : "running")}");
+        heartbeat.Start();
         Application.Run(this);
     }
-
-    private delegate IntPtr LLMP(int nCode, IntPtr wParam, IntPtr lParam);
 
     [Flags]
     private enum MouseEventFlag
@@ -1006,14 +1086,23 @@ public class MouseClickTool : Form
 
     private static StreamWriter? CreateLogWriter(bool enabled)
     {
-        if (enabled)
+        if (!enabled)
+        {
+            return null;
+        }
+
+        // 优先 exe 同级目录;只读目录(如 Program Files)回退"我的文档"
+        var dirs = new[] { AppContext.BaseDirectory, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "MouseClickTool") };
+        foreach (var dir in dirs)
         {
             try
             {
-                return new("MouseClickTool.LOG", true);
+                Directory.CreateDirectory(dir);
+                return new StreamWriter(Path.Combine(dir, "MouseClickTool.LOG"), true);
             }
-            catch
+            catch (Exception ex)
             {
+                Log.Error($"create script log writer failed at {dir}", ex);
             }
         }
 
@@ -1067,7 +1156,7 @@ public class MouseClickTool : Form
         return key != Keys.None;
     }
 
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     private static extern bool RegisterHotKey(IntPtr hWnd, int id, int fsModifiers, Keys vk);
 
     // 参考：https://stackoverflow.com/questions/5094398/how-to-programmatically-mouse-move-click-right-click-and-keypress-etc-in-winfo
@@ -1081,16 +1170,7 @@ public class MouseClickTool : Form
     private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
     [DllImport("user32.dll")]
-    private static extern IntPtr SetWindowsHookEx(int idHook, LLMP lpfn, IntPtr hMod, uint dwThreadId);
-
-    [DllImport("user32.dll")]
-    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
-    private static extern IntPtr GetModuleHandle(string? lpModuleName);
+    private static extern short GetAsyncKeyState(int vKey);
 
     private void SendInput(int cbSize)
     {
@@ -1099,45 +1179,59 @@ public class MouseClickTool : Form
 
     private void UpdateText()
     {
-        var d2 = Controls.OfType<Button>().First();
-        d2.Text = $"{(z == null ? lang[0] : lang[1])} ({cfg[0]})";
-        d2.Enabled = true;
+        var d2 = Controls.OfType<Button>().FirstOrDefault();
+        if (d2 != null)
+        {
+            d2.Text = $"{(z == null ? lang[0] : lang[1])} ({cfg[0]})";
+            d2.Enabled = true;
+        }
     }
 
     private void Trigger()
     {
         wait = 0;
-        Controls.OfType<Button>().FirstOrDefault().PerformClick();
+        Controls.OfType<Button>().FirstOrDefault()?.PerformClick();
     }
 
-    private void HookMouse()
+    // 中键触发用轮询而非低级钩子:实测 CLR 的反向 P/Invoke 桩在 LL 钩子回调进入托管代码时
+    // 会随机抛出无堆栈 NullReferenceException 直接杀死进程(转储证据 IL_STUB_ReversePInvoke),
+    // 故彻底移除该组件;40ms 轮询延迟无感知,且不依赖消息循环,无重入风险
+    private void StartMiddlePoll()
     {
-        if (hh == IntPtr.Zero)
+        if (middlePoll != null)
         {
-            hh = SetWindowsHookEx(14, hp ??= MouseHookCb, GetModuleHandle(null), 0);
+            return;
         }
+
+        middlePoll = new System.Windows.Forms.Timer { Interval = 40 };
+        middlePoll.Tick += (_, _) =>
+        {
+            try
+            {
+                var down = (GetAsyncKeyState(0x04) & 0x8000) != 0;
+                if (!down && middleDown && Environment.TickCount - ht > 500)
+                {
+                    ht = Environment.TickCount;
+                    Log.Info("middle trigger (poll)");
+                    Trigger();
+                }
+
+                middleDown = down;
+            }
+            catch (Exception ex)
+            {
+                Log.Error("middle poll failed", ex);
+            }
+        };
+        middlePoll.Start();
+        Log.Info("middle poll started");
     }
 
-    private void UnhookMouse()
+    private void StopMiddlePoll()
     {
-        if (hh != IntPtr.Zero)
-        {
-            UnhookWindowsHookEx(hh);
-            hh = IntPtr.Zero;
-        }
-    }
-
-    private IntPtr MouseHookCb(int nCode, IntPtr wParam, IntPtr lParam)
-    {
-        // 松开中键才触发（按下不触发，便于按住预备/瞄准；按住期间目标可能处于中键特殊状态，
-        // 如浏览器自动滚动，此时合成的连击会被吞掉）。500ms 去抖：滚轮回弹易产生二次 WM_MBUTTONUP，会误触发"停止"
-        if (nCode >= 0 && wParam == (IntPtr)0x0208 && Environment.TickCount - ht > 500)
-        {
-            ht = Environment.TickCount;
-            Trigger();
-        }
-
-        return CallNextHookEx(hh, nCode, wParam, lParam);
+        middlePoll?.Stop();
+        middlePoll = null;
+        Log.Info("middle poll stopped");
     }
 
     [StructLayout(LayoutKind.Sequential)]

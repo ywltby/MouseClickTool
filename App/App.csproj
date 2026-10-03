@@ -9,11 +9,9 @@
     <ProjectReference Include="..\MouseClickTool\MouseClickTool.csproj">
         <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
     </ProjectReference>
+    <Reference Include="System.Windows.Forms" />
     <None Remove=".gitignore" />
-    <None Remove="MouseClickTool.dll" />
-    <None Remove="x64.GZ" />
-    <None Remove="x86.GZ" />
-    <EmbeddedResource Include="x86.GZ" />
+    <EmbeddedResource Include="..\bin\dll\$(TargetFramework)\MouseClickTool.dll" LogicalName="MouseClickTool.dll" />
     <PackageReference Include="StyleCop.Analyzers" Version="1.2.0-beta.556">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>

@@ -23,6 +23,7 @@
 - 已添加随机扰动，避免被检测
 - 自定义脚本(Beta) [如何编写脚本?](https://github.com/lalakii/MouseClickTool?tab=readme-ov-file#%E7%BC%96%E5%86%99%E8%87%AA%E5%AE%9A%E4%B9%89%E8%84%9A%E6%9C%AC)
 - 自定义语言，和应用程序放在同一目录下 -> [英文语言模板](https://github.com/lalakii/MouseClickTool/blob/master/lang/Custom%20Language.ini)
+- 内置诊断日志（自动记录启动环境、触发、异常），优先保存在 exe 同级的 logs 目录，目录不可写时回退到“我的文档\MouseClickTool\logs”，按天滚动保留 7 天
 
 ## 下载
 
@@ -79,6 +80,8 @@ exit()
 ```
 
 ## 常见问题
+
+程序异常退出或行为异常时，请查看 exe 同级 logs 目录（不存在则查看“我的文档\MouseClickTool\logs”，再否则 %TEMP%\MouseClickTool_log）下对应日期的日志文件，反馈问题时可将其一并提供，便于定位原因。
 
 如何退出？如果鼠标点击频率过快无法停下来，请先让程序窗口到前台（ALT+TAB），然后按 ALT+F4 关闭程序。
 

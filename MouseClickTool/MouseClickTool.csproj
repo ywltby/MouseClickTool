@@ -7,9 +7,6 @@
     <RunPostBuildEvent>OnOutputUpdated</RunPostBuildEvent>
   </PropertyGroup>
   <ItemGroup>
-	  <ProjectReference Include="..\EasyGzip\EasyGzip.csproj">
-		  <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
-	  </ProjectReference>
     <None Remove=".gitignore" />
     <PackageReference Include="StyleCop.Analyzers" Version="1.2.0-beta.556">
       <PrivateAssets>all</PrivateAssets>
@@ -17,7 +14,4 @@
     </PackageReference>
     <Reference Include="System.Windows.Forms" />
   </ItemGroup>
-  <Target Name="PostBuild" AfterTargets="PostBuildEvent">
-    <Exec Command="cd &quot;$(SolutionDir)&quot; &amp;&amp; .\bat\gen_pkg.bat" />
-  </Target>
 </Project>

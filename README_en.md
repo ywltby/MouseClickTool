@@ -21,6 +21,7 @@
 - Random perturbation to prevent detection  
 - Customizable scripts (Beta): [How do I write scripts?](https://github.com/lalakii/MouseClickTool/blob/master/README_en.md#write-custom-scripts)
 - Custom language file: Place it in the same directory as the application -> [English Language Template](https://github.com/lalakii/MouseClickTool/blob/master/lang/Custom%20Language.ini)
+- Built-in diagnostic logging (startup environment, triggers, exceptions) in a "logs" folder next to the exe (falls back to "Documents\MouseClickTool\logs" if not writable), rotated daily and kept for 7 days
 
 ## Download
 
@@ -77,6 +78,8 @@ exit()
 ```
 
 ## FAQs
+
+If the program exits unexpectedly or misbehaves, check the "logs" folder next to the exe (or "Documents\MouseClickTool\logs", then %TEMP%\MouseClickTool_log) for the log file of the corresponding date and include it when reporting the issue.
 
 If the tool cannot click in certain applications or games, try running it as Administrator or with TrustedInstaller privileges.
 
