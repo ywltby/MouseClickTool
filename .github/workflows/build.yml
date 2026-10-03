@@ -1,0 +1,58 @@
+name: build
+
+on:
+  push:
+    branches: [ master ]
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Build
+        run: dotnet build MouseClickTool.slnx -c Release
+        shell: pwsh
+
+      - name: Read version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = ([regex]::Match((Get-Content Directory.Build.props), '<Version>([^<]+)</Version>')).Groups[1].Value
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MouseClickTool-${{ steps.ver.outputs.version }}-${{ github.sha }}
+          path: bin/MouseClickTool/net462/MouseClickTool.exe
+
+      # 每次 commit 到 master:自动挂 pre 预发布版(同提交重复推送时先删旧预发布)
+      - name: Create pre-release
+        if: github.ref == 'refs/heads/master'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $sha = "${{ github.sha }}".Substring(0, 7)
+          $tag = "v${{ steps.ver.outputs.version }}-pre.$sha"
+          gh release delete $tag --yes --cleanup-tag 2>$null
+          gh release create $tag "bin/MouseClickTool/net462/MouseClickTool.exe" --prerelease --title "Pre-release $tag" --notes "Automated pre-release from commit $sha."
+
+      # 推送 v* 标签:自动发正式版,附件为 Release 构建
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release create $tag "bin/MouseClickTool/net462/MouseClickTool.exe" --title $tag --generate-notes
